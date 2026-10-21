@@ -39,7 +39,32 @@ Return ONLY a JSON array of exactly {len(lines)} items: [{{"queries":["main","fa
     return json.loads(re.search(r"\[.*\]", r.content[0].text, re.S).group(0))
 
 def find_clip(queries, orientation, used):
-    h = {"Authorization": os.environ["PEXELS_API_KEY"]}
+    key = os.environ["STOCK_KEY"]
+    if os.environ.get("STOCK_PROVIDER") == "pexels":
+        return find_clip_pexels(key, queries, orientation, used)
+    return find_clip_pixabay(key, queries, orientation, used)
+
+def find_clip_pixabay(key, queries, orientation, used):
+    for q in queries:
+        r = requests.get("https://pixabay.com/api/videos/", timeout=30,
+                         params={"key": key, "q": q, "per_page": 20, "safesearch": "true"})
+        r.raise_for_status()
+        hits = r.json().get("hits", [])
+        # portrait: prefer clips that are already tall, else we crop the centre
+        hits.sort(key=lambda v: 0 if orientation == "landscape" else
+                  -(1 if (v["videos"].get("medium") or {}).get("height", 0) > (v["videos"].get("medium") or {}).get("width", 0) else 0))
+        for v in hits:
+            if v["id"] in used:
+                continue
+            for size in ("medium", "large", "small", "tiny"):
+                f = v["videos"].get(size) or {}
+                if f.get("url"):
+                    used.add(v["id"])
+                    return f["url"]
+    return None
+
+def find_clip_pexels(key, queries, orientation, used):
+    h = {"Authorization": key}
     tw = 1280 if orientation == "landscape" else 720
     for q in queries:
         r = requests.get("https://api.pexels.com/videos/search", headers=h, timeout=30,
@@ -74,6 +99,8 @@ def build(lines, plans, voice, orientation, wd, on_step):
         audio = AudioFileClip(ap)
         d = audio.duration + 0.25
         url = find_clip(plan["queries"], orientation, used) or find_clip(["people lifestyle"], orientation, used)
+        if not url:
+            raise RuntimeError(f"Line {i+1} ke liye footage nahi mili: {line[:40]}")
         vp = f"{wd}/v{i}.mp4"
         download(url, vp)
         v = VideoFileClip(vp).without_audio()
@@ -103,12 +130,14 @@ if APP_PASSWORD:
                 st.error("Galat password.")
         st.stop()
 
-ak, pk = secret("ANTHROPIC_API_KEY"), secret("PEXELS_API_KEY")
+ak = secret("ANTHROPIC_API_KEY")
+provider = "pexels" if (secret("PEXELS_API_KEY") and not secret("PIXABAY_API_KEY")) else "pixabay"
+pk = secret("PIXABAY_API_KEY") or secret("PEXELS_API_KEY")
 with st.sidebar:
     if not (ak and pk):
         st.caption("Keys sirf is session mein use hoti hain")
         ak = st.text_input("Anthropic API key", type="password")
-        pk = st.text_input("Pexels API key (free)", type="password")
+        pk = st.text_input("Pixabay API key (free)", type="password")
     voice_name = st.selectbox("Voiceover", list(VOICES))
     orientation = st.radio("Format", ["landscape", "portrait"], format_func=lambda x: "16:9 YouTube" if x == "landscape" else "9:16 Shorts")
 niche = st.selectbox("Niche", ["health", "psychology", "history", "general"])
@@ -122,7 +151,7 @@ if st.button("🎥 Video banao", type="primary"):
     elif len(split_lines(script)) > MAX_LINES:
         st.error(f"Script bohat lambi hai. Ek dafa mein maximum {MAX_LINES} lines rakho, baaki alag video mein banao.")
     else:
-        os.environ["ANTHROPIC_API_KEY"], os.environ["PEXELS_API_KEY"] = ak, pk
+        os.environ["ANTHROPIC_API_KEY"], os.environ["STOCK_KEY"], os.environ["STOCK_PROVIDER"] = ak, pk, provider
         lines = split_lines(script)
         bar = st.progress(0, text="Scenes plan ho rahe hain...")
         try:
